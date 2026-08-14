@@ -12,7 +12,7 @@ if [[ "$host_arch" != "arm64" ]]; then
   exit 1
 fi
 
-for command_name in cargo codesign ditto file hdiutil rustup xcrun; do
+for command_name in cargo codesign ditto file hdiutil rustc xcrun; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     echo "필수 도구를 찾지 못했습니다: $command_name" >&2
     exit 1
@@ -36,8 +36,18 @@ if [[ -z "$version" ]]; then
   exit 1
 fi
 
-rustup target add "$target"
-cargo build --manifest-path "$project_root/Cargo.toml" --release --target "$target"
+if command -v rustup >/dev/null 2>&1; then
+  rustup target add "$target"
+  cargo build --manifest-path "$project_root/Cargo.toml" --release --target "$target"
+else
+  rust_host="$(rustc -vV | sed -n 's/^host: //p')"
+  if [[ "$rust_host" != "$target" ]]; then
+    echo "rustup 없이 $target 빌드를 만들 수 없습니다. 현재 Rust 호스트: $rust_host" >&2
+    exit 1
+  fi
+  cargo build --manifest-path "$project_root/Cargo.toml" --release
+  release_binary="$project_root/target/release/dog-translate"
+fi
 
 mkdir -p "$dist_root"
 case "$app_root" in
@@ -87,7 +97,7 @@ fi
 if [[ -z "$codex_binary" ]] && command -v npm >/dev/null 2>&1; then
   npm_root="$(npm root -g 2>/dev/null || true)"
   if [[ -d "$npm_root/@openai/codex/node_modules" ]]; then
-    codex_binary="$(find "$npm_root/@openai/codex/node_modules" -type f -name codex -path '*/vendor/*/codex/codex' -print -quit 2>/dev/null || true)"
+    codex_binary="$(find "$npm_root/@openai/codex/node_modules" -type f -name codex \( -path '*/vendor/*/codex/codex' -o -path '*/vendor/*/bin/codex' \) -print -quit 2>/dev/null || true)"
   fi
 fi
 if [[ -z "$codex_binary" ]] && command -v codex >/dev/null 2>&1; then
@@ -126,7 +136,16 @@ sign_component() {
 if [[ -f "$providers_root/codex" ]]; then
   sign_component "$providers_root/codex"
 fi
-sign_component "$app_root"
+if [[ "$sign_identity" == "-" ]]; then
+  # The default designated requirement of an ad-hoc signature is its cdhash,
+  # which changes after every build and makes macOS treat the update as a new
+  # app for TCC permissions. Keep a stable bundle-based requirement instead.
+  codesign --force --sign - \
+    --requirements '=designated => identifier "com.dogtranslate.app"' \
+    "$app_root"
+else
+  sign_component "$app_root"
+fi
 codesign --verify --deep --strict --verbose=2 "$app_root"
 
 notary_profile="${DOG_TRANSLATE_NOTARY_PROFILE:-}"

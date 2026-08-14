@@ -9,7 +9,7 @@ Apache License 2.0으로 배포됩니다. 자세한 내용은 [LICENSE](LICENSE)
 ## 현재 동작
 
 1. 번역할 Discord, Element 또는 브라우저 위에 마우스를 둡니다.
-2. Windows에서는 `Ctrl+T`, macOS에서는 `⌘T`를 누른 뒤 캡처 화면 상단에서 `한 줄·문단·원문 위치` 단위를 고르고, 계속 번역할 영역을 드래그합니다.
+2. Windows와 macOS에서 `Ctrl+T`를 누른 뒤 캡처 화면 상단에서 `한 줄·문단·원문 위치` 단위를 고르고, 계속 번역할 영역을 드래그합니다.
 3. 실제 화면으로 돌아간 뒤 Windows OCR 또는 macOS Vision이 영역 안의 영어 줄과 위치를 찾습니다.
 4. 모델 응답을 기다리는 동안 각 원문 위치에 `번역 중…`이 먼저 표시됩니다.
 5. 번역이 도착하면 같은 위치의 표시가 한국어로 교체되고 영역 변경을 계속 감시합니다.
@@ -95,7 +95,7 @@ Windows에서는 Apple SDK, `codesign`, `hdiutil`을 사용할 수 없으므로 
 
 화면 번역에는 macOS의 **화면 기록**, 선택문 자동 복사에는 **손쉬운 사용** 권한이 필요합니다. 스크립트는 기본적으로 ad-hoc 서명하며, 다른 사람에게 배포할 때는 `DOG_TRANSLATE_CODESIGN_IDENTITY`에 Developer ID Application 인증서 이름을 지정한 뒤 Apple notarization을 진행해야 Gatekeeper 경고를 줄일 수 있습니다. Claude는 공식 Claude Code 설치본을 탐색하고, ChatGPT는 네이티브 Codex를 찾으면 앱 번들에 포함합니다.
 
-실시간 번역은 Windows의 `Ctrl+T`, macOS의 `⌘T`로 켜고 끕니다. 앱이 실행 중이면 이 전역 단축키가 현재 앱의 일반 단축키보다 우선합니다.
+실시간 번역은 Windows와 macOS 모두 `Ctrl+T`로 켜고 끕니다. 앱이 실행 중이면 이 전역 단축키가 현재 앱의 일반 단축키보다 우선합니다.
 
 ## 빠른 입력 번역
 
@@ -113,10 +113,8 @@ Discord, Element, 브라우저 등의 입력창에서 `Ctrl+A` 또는 마우스�
 
 ## 단축키
 
-| 기능 | 단축키 |
-|---|---|
-| 선택 영역 실시간 영어 → 한국어 | `Ctrl+T` |
-| 선택한 한국어 → 영어 번역 준비 / 진행 중 취소 | `Ctrl+B` |
-| 영역 선택·화면 오버레이 취소 후 백그라운드 대기 | `Esc` |
-
-macOS에서는 위 표의 `Ctrl`을 `⌘`로 사용합니다.
+| 기능 | Windows | macOS |
+|---|---|---|
+| 선택 영역 실시간 영어 → 한국어 | `Ctrl+T` | `Control+T` |
+| 선택한 한국어 → 영어 번역 준비 / 진행 중 취소 | `Ctrl+B` | `⌘B` |
+| 영역 선택·화면 오버레이 취소 후 백그라운드 대기 | `Esc` | `Esc` |

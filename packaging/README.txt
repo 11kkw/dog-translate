@@ -24,7 +24,7 @@ Licenses
 Keyboard shortcuts
 - Windows: Ctrl+T, Ctrl+B, Esc
 - Esc cancels area selection or the active overlay and keeps Dog Translate hidden in the background.
-- macOS: Command+T, Command+B
+- macOS: Control+T, Command+B
 
 macOS permissions
 - Allow Screen Recording when macOS asks so Dog Translate can capture the selected region.

@@ -46,10 +46,8 @@ use xcap::image::{RgbaImage, imageops};
 
 const WINDOW_SIZE: Vec2 = Vec2::new(640.0, 520.0);
 const WINDOW_MIN_SIZE: Vec2 = Vec2::new(560.0, 460.0);
-#[cfg(not(target_os = "macos"))]
 const SCREEN_HOTKEY_LABEL: &str = "Ctrl + T";
-#[cfg(target_os = "macos")]
-const SCREEN_HOTKEY_LABEL: &str = "⌘ + T";
+const SHOW_CAPTURED_SELECTION_BACKGROUND: bool = !cfg!(target_os = "macos");
 #[cfg(not(target_os = "macos"))]
 const SELECTION_CLIPBOARD_HOTKEY_LABEL: &str = "Ctrl + B";
 #[cfg(target_os = "macos")]
@@ -102,23 +100,34 @@ pub(crate) fn run() -> eframe::Result {
 enum DiagnosticInput {
     Image(std::path::PathBuf),
     KoreanText(String),
+    Screen,
 }
 
 fn diagnostic_input() -> Option<DiagnosticInput> {
     let mut args = std::env::args_os();
     let _program = args.next();
-    match (args.next(), args.next()) {
-        (Some(flag), Some(path)) if flag == "--translate-image" => {
-            Some(DiagnosticInput::Image(path.into()))
-        }
-        (Some(flag), Some(text)) if flag == "--translate-korean" => Some(
-            DiagnosticInput::KoreanText(text.to_string_lossy().into_owned()),
-        ),
-        _ => None,
+    let flag = args.next()?;
+    if flag == "--diagnose-screen" {
+        return Some(DiagnosticInput::Screen);
+    }
+
+    let value = args.next()?;
+    if flag == "--translate-image" {
+        Some(DiagnosticInput::Image(value.into()))
+    } else if flag == "--translate-korean" {
+        Some(DiagnosticInput::KoreanText(
+            value.to_string_lossy().into_owned(),
+        ))
+    } else {
+        None
     }
 }
 
 fn run_diagnostic(input: DiagnosticInput) -> anyhow::Result<()> {
+    if matches!(input, DiagnosticInput::Screen) {
+        return run_screen_diagnostic();
+    }
+
     let (source, direction, source_label, target_label) = match input {
         DiagnosticInput::Image(path) => {
             let image = xcap::image::open(path)?.to_rgba8();
@@ -135,6 +144,7 @@ fn run_diagnostic(input: DiagnosticInput) -> anyhow::Result<()> {
             "KO",
             "EN",
         ),
+        DiagnosticInput::Screen => unreachable!(),
     };
     let settings = settings::load();
     let requested_effort = settings.reasoning_efforts.get(&settings.model);
@@ -162,6 +172,53 @@ fn run_diagnostic(input: DiagnosticInput) -> anyhow::Result<()> {
     println!("{source_label}: {source}");
     println!("{target_label}: {}", result.text);
     println!("TIME: {:.2}s", result.wall_time.as_secs_f64());
+    Ok(())
+}
+
+fn run_screen_diagnostic() -> anyhow::Result<()> {
+    let permission_granted = capture::screen_capture_permission_granted();
+    println!("PERMISSION: {permission_granted}");
+    anyhow::ensure!(
+        permission_granted,
+        "macOS가 이 앱 번들의 화면 기록 권한을 허용하지 않은 상태로 인식합니다"
+    );
+
+    let captured = capture::capture_monitor_under_cursor()?;
+    let image = &captured.image;
+    let pixel_count = u64::from(image.width()) * u64::from(image.height());
+    let sample_step = usize::try_from((pixel_count / 100_000).max(1)).unwrap_or(1);
+    let mut sample_count = 0_u64;
+    let mut luminance_sum = 0.0_f64;
+    let mut luminance_min = 255.0_f64;
+    let mut luminance_max = 0.0_f64;
+    let mut alpha_min = u8::MAX;
+    let mut alpha_max = u8::MIN;
+
+    for pixel in image.pixels().step_by(sample_step) {
+        let [red, green, blue, alpha] = pixel.0;
+        let luminance =
+            0.2126 * f64::from(red) + 0.7152 * f64::from(green) + 0.0722 * f64::from(blue);
+        sample_count += 1;
+        luminance_sum += luminance;
+        luminance_min = luminance_min.min(luminance);
+        luminance_max = luminance_max.max(luminance);
+        alpha_min = alpha_min.min(alpha);
+        alpha_max = alpha_max.max(alpha);
+    }
+
+    let luminance_mean = luminance_sum / sample_count.max(1) as f64;
+    println!(
+        "CAPTURE: {}x{} · origin ({}, {}) · scale {:.2}",
+        image.width(),
+        image.height(),
+        captured.x,
+        captured.y,
+        captured.scale_factor
+    );
+    println!(
+        "LUMINANCE: mean {luminance_mean:.1} · min {luminance_min:.1} · max {luminance_max:.1} · samples {sample_count}"
+    );
+    println!("ALPHA: min {alpha_min} · max {alpha_max}");
     Ok(())
 }
 
@@ -456,13 +513,13 @@ impl TranslatorApp {
             .cloned()
             .unwrap_or_else(|| default_reasoning_for_model(&selected_model));
 
-        let primary_modifier = if cfg!(target_os = "macos") {
+        let selection_modifier = if cfg!(target_os = "macos") {
             Modifiers::META
         } else {
             Modifiers::CONTROL
         };
-        let screen_hotkey = HotKey::new(Some(primary_modifier), Code::KeyT);
-        let selection_clipboard_hotkey = HotKey::new(Some(primary_modifier), Code::KeyB);
+        let screen_hotkey = HotKey::new(Some(Modifiers::CONTROL), Code::KeyT);
+        let selection_clipboard_hotkey = HotKey::new(Some(selection_modifier), Code::KeyB);
         let escape_hotkey = HotKey::new(None, Code::Escape);
         let (hotkey_tx, hotkey_rx) = mpsc::channel();
         let hotkey_repaint = cc.egui_ctx.clone();
@@ -549,6 +606,12 @@ impl TranslatorApp {
 
     fn begin_capture(&mut self, ctx: &egui::Context) {
         if matches!(self.phase, AppPhase::Capturing | AppPhase::Selecting) || self.background_busy {
+            return;
+        }
+
+        if let Err(error) = capture::ensure_screen_capture_permission() {
+            self.status = "화면 기록 권한이 필요합니다".to_owned();
+            self.error = Some(format!("{error:#}"));
             return;
         }
 
@@ -737,7 +800,13 @@ impl TranslatorApp {
                     ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                     ctx.send_viewport_cmd(ViewportCommand::ContentProtected(false));
                     ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
-                    ctx.send_viewport_cmd(ViewportCommand::Transparent(false));
+                    // On macOS, keep this as a transparent input overlay so the
+                    // user selects against the real desktop. Repainting a full
+                    // captured frame in an opaque NSWindow can be composited much
+                    // darker than the source display.
+                    ctx.send_viewport_cmd(ViewportCommand::Transparent(
+                        !SHOW_CAPTURED_SELECTION_BACKGROUND,
+                    ));
                     ctx.send_viewport_cmd(ViewportCommand::Decorations(false));
                     ctx.send_viewport_cmd(ViewportCommand::Resizable(false));
                     ctx.send_viewport_cmd(ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
@@ -1415,14 +1484,14 @@ impl TranslatorApp {
                 toolbar_position = rect.min + Vec2::new(18.0, 18.0);
                 toolbar_bounds = Rect::from_min_size(toolbar_position, Vec2::new(570.0, 82.0));
                 let response = ui.interact(rect, ui.id().with("selection-area"), Sense::drag());
-                ui.painter().image(
-                    texture.id(),
-                    rect,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
-                ui.painter()
-                    .rect_filled(rect, 0.0, Color32::from_black_alpha(80));
+                if SHOW_CAPTURED_SELECTION_BACKGROUND {
+                    ui.painter().image(
+                        texture.id(),
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
 
                 if response.drag_started() {
                     let pointer = response.interact_pointer_pos();
@@ -1441,18 +1510,20 @@ impl TranslatorApp {
 
                 if let (Some(start), Some(current)) = (self.drag_start, self.drag_current) {
                     let selection = Rect::from_two_pos(start, current).intersect(rect);
-                    let uv = Rect::from_min_max(
-                        Pos2::new(
-                            (selection.min.x - rect.min.x) / rect.width(),
-                            (selection.min.y - rect.min.y) / rect.height(),
-                        ),
-                        Pos2::new(
-                            (selection.max.x - rect.min.x) / rect.width(),
-                            (selection.max.y - rect.min.y) / rect.height(),
-                        ),
-                    );
-                    ui.painter()
-                        .image(texture.id(), selection, uv, Color32::WHITE);
+                    if SHOW_CAPTURED_SELECTION_BACKGROUND {
+                        let uv = Rect::from_min_max(
+                            Pos2::new(
+                                (selection.min.x - rect.min.x) / rect.width(),
+                                (selection.min.y - rect.min.y) / rect.height(),
+                            ),
+                            Pos2::new(
+                                (selection.max.x - rect.min.x) / rect.width(),
+                                (selection.max.y - rect.min.y) / rect.height(),
+                            ),
+                        );
+                        ui.painter()
+                            .image(texture.id(), selection, uv, Color32::WHITE);
+                    }
                     ui.painter().rect_stroke(
                         selection,
                         0.0,
@@ -2018,7 +2089,10 @@ impl TranslatorApp {
                                 friendly_error_message(error),
                             )
                             .on_hover_text(error);
-                            if self.error.is_some()
+                            if self
+                                .error
+                                .as_ref()
+                                .is_some_and(|error| !error.contains("화면 기록 권한"))
                                 && ui
                                     .small_button(format!(
                                         "{} 다시 연결",
