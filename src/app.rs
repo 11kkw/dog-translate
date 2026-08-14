@@ -441,6 +441,7 @@ struct LiveOverlayLine {
 
 struct TranslatorApp {
     phase: AppPhase,
+    root_viewport_hidden: bool,
     capture_tx: Sender<CaptureEvent>,
     capture_rx: Receiver<CaptureEvent>,
     worker_tx: Sender<WorkerJob>,
@@ -553,6 +554,7 @@ impl TranslatorApp {
 
         Self {
             phase: AppPhase::Ready,
+            root_viewport_hidden: false,
             capture_tx,
             capture_rx,
             worker_tx,
@@ -625,7 +627,7 @@ impl TranslatorApp {
         let session = self.capture_session;
         self.error = None;
         self.status = "번역 창을 숨기고 화면을 캡처하는 중…".to_owned();
-        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        self.hide_main_window(ctx);
 
         let sender = self.capture_tx.clone();
         let repaint = ctx.clone();
@@ -797,6 +799,7 @@ impl TranslatorApp {
                     ));
 
                     let scale = screen.scale_factor;
+                    self.root_viewport_hidden = false;
                     ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
                     ctx.send_viewport_cmd(ViewportCommand::ContentProtected(false));
                     ctx.send_viewport_cmd(ViewportCommand::MousePassthrough(false));
@@ -1703,18 +1706,24 @@ impl TranslatorApp {
         }
     }
 
-    fn restore_main_window(&self, ctx: &egui::Context) {
+    fn restore_main_window(&mut self, ctx: &egui::Context) {
+        self.root_viewport_hidden = false;
         self.configure_main_window(ctx);
         ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(ViewportCommand::Focus);
     }
 
-    fn hide_main_window(&self, ctx: &egui::Context) {
+    fn hide_main_window(&mut self, ctx: &egui::Context) {
+        // Viewport commands take effect after this frame. Suppress root UI
+        // immediately so cancelling with Esc cannot paint the main window for
+        // one frame before AppKit hides it.
+        self.root_viewport_hidden = true;
         ctx.send_viewport_cmd(ViewportCommand::Visible(false));
     }
 
-    fn show_live_window(&self, ctx: &egui::Context, region: &LiveRegion) {
+    fn show_live_window(&mut self, ctx: &egui::Context, region: &LiveRegion) {
+        self.root_viewport_hidden = false;
         let scale = region.scale_factor;
         ctx.send_viewport_cmd(ViewportCommand::Fullscreen(false));
         ctx.send_viewport_cmd(ViewportCommand::Transparent(true));
@@ -2396,6 +2405,9 @@ impl eframe::App for TranslatorApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.show_translation_toast(ui.ctx());
+        if self.root_viewport_hidden {
+            return;
+        }
         match self.phase {
             AppPhase::Selecting => self.selection_ui(ui),
             AppPhase::Live => self.live_ui(ui),

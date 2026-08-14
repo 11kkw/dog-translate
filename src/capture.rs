@@ -13,6 +13,8 @@ use std::{
     process::Command,
     ptr,
     sync::{Arc, Mutex, OnceLock},
+    thread,
+    time::Duration,
 };
 
 #[cfg(target_os = "macos")]
@@ -95,7 +97,7 @@ pub fn ensure_screen_capture_permission() -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn screen_capture_filter(display_id: u32) -> Result<Arc<SCContentFilter>> {
+fn screen_capture_filter(display_id: u32, expected_frame: CGRect) -> Result<Arc<SCContentFilter>> {
     static FILTERS: OnceLock<Mutex<HashMap<u32, Arc<SCContentFilter>>>> = OnceLock::new();
     let filters = FILTERS.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -108,37 +110,88 @@ fn screen_capture_filter(display_id: u32) -> Result<Arc<SCContentFilter>> {
         return Ok(filter);
     }
 
-    let content = SCShareableContent::get().map_err(|error| {
-        anyhow::anyhow!("ScreenCaptureKit 화면 목록을 읽지 못했습니다: {error}")
-    })?;
-    let display = content
-        .displays()
-        .into_iter()
-        .find(|display| display.display_id() == display_id)
-        .with_context(|| {
-            format!("ScreenCaptureKit에서 디스플레이 {display_id}를 찾지 못했습니다")
-        })?;
-    let filter = Arc::new(
-        SCContentFilter::create()
-            .with_display(&display)
-            .with_excluding_windows(&[])
-            .build(),
-    );
-    filters
-        .lock()
-        .map_err(|_| anyhow::anyhow!("화면 캡처 필터 잠금이 손상되었습니다"))?
-        .insert(display_id, filter.clone());
-    Ok(filter)
+    let mut available_displays = Vec::new();
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match SCShareableContent::get() {
+            Ok(content) => {
+                let displays = content.displays();
+                available_displays = displays
+                    .iter()
+                    .map(|display| {
+                        let frame = display.frame();
+                        format!(
+                            "{}@{:.0},{:.0} {:.0}x{:.0}",
+                            display.display_id(),
+                            frame.origin.x,
+                            frame.origin.y,
+                            frame.size.width,
+                            frame.size.height
+                        )
+                    })
+                    .collect();
+                let display = displays
+                    .iter()
+                    .find(|display| display.display_id() == display_id)
+                    .or_else(|| {
+                        displays
+                            .iter()
+                            .find(|display| display_frames_match(display.frame(), expected_frame))
+                    });
+                if let Some(display) = display {
+                    let filter = Arc::new(
+                        SCContentFilter::create()
+                            .with_display(display)
+                            .with_excluding_windows(&[])
+                            .build(),
+                    );
+                    filters
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("화면 캡처 필터 잠금이 손상되었습니다"))?
+                        .insert(display_id, filter.clone());
+                    return Ok(filter);
+                }
+                last_error = None;
+            }
+            Err(error) => last_error = Some(error.to_string()),
+        }
+
+        if attempt < 2 {
+            thread::sleep(Duration::from_millis(80));
+        }
+    }
+
+    let available = if available_displays.is_empty() {
+        "없음".to_owned()
+    } else {
+        available_displays.join(", ")
+    };
+    let detail = last_error
+        .map(|error| format!(" · 마지막 오류: {error}"))
+        .unwrap_or_default();
+    bail!(
+        "ScreenCaptureKit에서 디스플레이 {display_id}를 찾지 못했습니다 · 감지된 화면: {available}{detail}"
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn display_frames_match(left: CGRect, right: CGRect) -> bool {
+    const TOLERANCE: f64 = 1.0;
+    (left.origin.x - right.origin.x).abs() <= TOLERANCE
+        && (left.origin.y - right.origin.y).abs() <= TOLERANCE
+        && (left.size.width - right.size.width).abs() <= TOLERANCE
+        && (left.size.height - right.size.height).abs() <= TOLERANCE
 }
 
 #[cfg(target_os = "macos")]
 fn capture_with_screen_capture_kit(
     display_id: u32,
+    display_frame: CGRect,
     width: u32,
     height: u32,
     source_rect: Option<CGRect>,
 ) -> Result<RgbaImage> {
-    let filter = screen_capture_filter(display_id)?;
+    let filter = screen_capture_filter(display_id, display_frame)?;
     let mut configuration = SCStreamConfiguration::new()
         .with_width(width.max(1))
         .with_height(height.max(1));
@@ -215,7 +268,13 @@ pub fn capture_monitor_at(x: i32, y: i32) -> Result<CapturedScreen> {
         let screen_height = screen.height().context("모니터 높이를 읽지 못했습니다")?;
         let width = ((screen_width as f32 * scale_factor).round() as u32).max(1);
         let height = ((screen_height as f32 * scale_factor).round() as u32).max(1);
-        match capture_with_screen_capture_kit(screen_id, width, height, None) {
+        let display_frame = CGRect::new(
+            screen_x as f64,
+            screen_y as f64,
+            screen_width as f64,
+            screen_height as f64,
+        );
+        match capture_with_screen_capture_kit(screen_id, display_frame, width, height, None) {
             Ok(image) => image,
             Err(error) if screen_capture_kit_is_unavailable(&error) => {
                 screen.capture_image().context("화면 캡처에 실패했습니다")?
@@ -301,8 +360,33 @@ pub fn capture_monitor_region(
             logical_width as f64,
             logical_height as f64,
         );
-        let screen_id = screen.id().context("macOS 모니터 식별자를 읽지 못했습니다")?;
-        match capture_with_screen_capture_kit(screen_id, width, height, Some(source_rect)) {
+        let screen_id = screen
+            .id()
+            .context("macOS 모니터 식별자를 읽지 못했습니다")?;
+        let screen_x = screen
+            .x()
+            .context("macOS 모니터 가로 위치를 읽지 못했습니다")?;
+        let screen_y = screen
+            .y()
+            .context("macOS 모니터 세로 위치를 읽지 못했습니다")?;
+        let screen_width = screen
+            .width()
+            .context("macOS 모니터 너비를 읽지 못했습니다")?;
+        let screen_height = screen
+            .height()
+            .context("macOS 모니터 높이를 읽지 못했습니다")?;
+        match capture_with_screen_capture_kit(
+            screen_id,
+            CGRect::new(
+                screen_x as f64,
+                screen_y as f64,
+                screen_width as f64,
+                screen_height as f64,
+            ),
+            width,
+            height,
+            Some(source_rect),
+        ) {
             Ok(image) => Ok(image),
             Err(error) if screen_capture_kit_is_unavailable(&error) => screen
                 .capture_region(logical_x, logical_y, logical_width, logical_height)
