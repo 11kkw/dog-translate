@@ -56,7 +56,7 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNRequestHandler",
     "objc2-core-foundation",
 ] }
-screencapturekit = { version = "8.0.1", features = ["macos_14_0"] }
+screencapturekit = { version = "10.0.3", features = ["macos_14_0"] }
 
 [profile.release]
 lto = "thin"
